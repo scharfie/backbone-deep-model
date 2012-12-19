@@ -127,150 +127,114 @@
             return getNested(this.attributes, attr);
         },
 
-        // Override set
-        // Supports nested attributes via the syntax 'obj.attr' e.g. 'author.user.name'
-        set: function(key, value, options) {
-            //<custom code>
-            var Model = Backbone.Model;
-            //</custom code>
+        //override default set
+        set: function(key, val, options) {
+          var attr, attrs;
+          if (key == null) return this;
 
-            var attrs, attr, val;
-
-            // Handle both `"key", value` and `{key: value}` -style arguments.
-            if (_.isObject(key) || key == null) {
-                attrs = key;
-                options = value;
-            } else {
-                attrs = {};
-                attrs[key] = value;
-            }
-
-            // Extract attributes and options.
-            options || (options = {});
-            if (!attrs) return this;
-            if (attrs instanceof Model) attrs = attrs.attributes;
-            if (options.unset) for (attr in attrs) attrs[attr] = void 0;
-
-            // Run validation.
-            if (!this._validate(attrs, options)) return false;
-
-            // Check for changes of `id`.
-            if (!_.isUndefined(getNested(attrs, this.idAttribute))) this.id = getNested(attrs, this.idAttribute);
-
-            var changes = options.changes = {};
-            var now = this.attributes;
-            var escaped = this._escapedAttributes;
-            var prev = this._previousAttributes || {};
-
-
-            // <custom code>
-            attrs = objToPaths(attrs);
-
-            // For each `set` attribute...
-            for (attr in attrs) {
-              val = attrs[attr];
-
-              var currentValue = getNested(now, attr),
-                  previousValue = getNested(prev, attr),
-                  escapedValue = getNested(escaped, attr),
-                  hasCurrentValue = _.isUndefined(currentValue),
-                  hasPreviousValue = _.isUndefined(previousValue);
-
-              // If the new and current value differ, record the change.
-              if (!_.isEqual(currentValue, val) || (options.unset && hasCurrentValue)) {
-                deleteNested(escaped, attr);
-                setNested((options.silent ? this._silent : changes), attr, true);
-              }
-
-              // Update or delete the current value.
-              options.unset ? deleteNested(now, attr) : setNested(now, attr, val);
-
-              // If the new and previous value differ, record the change.  If not,
-              // then remove changes for this attribute.
-              if (!_.isEqual(previousValue, val) || (hasCurrentValue != hasPreviousValue)) {
-                setNested(this.changed, attr, _.clone(val));
-                if (!options.silent) setNested(this._pending, attr, true);
-              } else {
-                deleteNested(this.changed, attr);
-                deleteNested(this._pending, attr);
-              }
-            }
-
-            // Fire the `"change"` events.
-            if (!options.silent) this.change(options);
-            return this;
-        },
-
-        // Override has
-        has: function(attr) {
-          return getNested(this.attributes, attr) != null;
-        },
-
-        // Override change
-        change: function(options) {
-          options || (options = {});
-          var separator = DeepModel.keyPathSeparator,
-              ancestorPaths = {};
-              
-          var attr;
-          var changing = this._changing;
-          this._changing = true;
-
-          // Silent changes become pending changes.
-          for (attr in objToPaths(this._silent)) setNested(this._pending, attr, true);
-
-          // Silent changes are triggered.
-          var changes = _.extend({}, options.changes, this._silent);
-          this._silent = {};
-          for (attr in objToPaths(changes)) {
-            // Store 'ancestor' event paths to trigger later
-            var i, path = '', attrPath = attr.split(separator);
-            for (i=0 ; i<attrPath.length ; i++) {
-              ancestorPaths[path] = true;
-              path += attrPath[i] + separator;
-            }
-            // Trigger 'leaf' event
-            this.trigger('change:' + attr, this, this.get(attr), options);
-          }
-          if (changing) return this;
-
-          // Continue firing `"change"` events while there are pending changes.
-          while (!_.isEmpty(this._pending)) {
-            this._pending = {};
-            this.trigger('change', this, options);
-            // Pending and silent changes still remain.
-            for (attr in objToPaths(this.changed)) {
-              if (getNested(this._pending, attr) || getNested(this._silent, attr)) continue;
-              deleteNested(this.changed, attr);
-            }
-            this._previousAttributes = _.clone(this.attributes);
+          // Handle both `"key", value` and `{key: value}` -style arguments.
+          if (_.isObject(key)) {
+            attrs = key;
+            options = val;
+          } else {
+            (attrs = {})[key] = val;
           }
 
-          // Trigger change events for ancestors
-          for (var path in ancestorPaths) {
-            this.trigger('change:' + path + '*', this, this.get(path), options);
+          // Extract attributes and options.
+          var silent = options && options.silent;
+          var unset = options && options.unset;
+
+          // Run validation.
+          if (!this._validate(attrs, options)) return false;
+
+          // Check for changes of `id`.
+          if (this.idAttribute in attrs) this.id = attrs[this.idAttribute];
+
+          var now = this.attributes;
+
+          // For each `set` attribute...
+          for (attr in attrs) {
+            val = attrs[attr];
+
+            // Update or delete the current value, and track the change.
+            unset ? deleteNested(now, attr) : setNested(now, attr, val);
+            this._changes.push(attr, val);
           }
 
-          this._changing = false;
+          // Signal that the model's state has potentially changed, and we need
+          // to recompute the actual changes.
+          this._hasComputed = false;
+
+          // Fire the `"change"` events.
+          if (!silent) this.change(options);
           return this;
         },
 
-        hasChanged: function(attr) {
-          var self = this;
+        _computeChanges: function(loud) {
+          //!start custom code
+          var separator = DeepModel.keyPathSeparator;
+          //!end custom code
+
+          this.changed = {};
+          var already = {};
+          var triggers = [];
+          var current = this._currentAttributes;
+          var changes = this._changes;
+
+          // Loop through the current queue of potential model changes.
+          for (var i = changes.length - 2; i >= 0; i -= 2) {
+            var key = changes[i], val = changes[i + 1];
+            if (already[key]) continue;
+            already[key] = true;
+
+            // Check if the attribute has been modified since the last change,
+            // and update `this.changed` accordingly. If we're inside of a `change`
+            // call, also add a trigger to the list.
+            if (current[key] !== val) {
+              this.changed[key] = val;
+              if (!loud) continue;
+              triggers.push(key, val);
+              current[key] = val;
+
+              //!start custom code
+              //Add ancestor path changes
+              var path = key.split(separator),
+                  ancestorKey;
+              path.splice(-1);
+              while (path.length) {
+                ancestorKey = path.join(separator)+'.*';
+
+                triggers.push(ancestorKey, val);
+
+                path.splice(-1);
+              }
+              //!end custom code
+            }
+          }
+          if (loud) this._changes = [];
+
+          // Signals `this.changed` is current to prevent duplicate calls from `this.hasChanged`.
+          this._hasComputed = true;
+          return triggers;
+        },
+
+        /*hasChanged: function(attr) {
+          if (!this._hasComputed) this._computeChanges();
 
           //Empty objects indicate no changes, so remove these first
+          var self = this;
           _.each(this.changed, function(val, key) {
             if (_.isObject(val) && _.isEmpty(val)) {
               delete self.changed[key];
             }
           });
 
-          if (!arguments.length) return !_.isEmpty(this.changed);
-          return getNested(this.changed, attr) != null;
-        },
+          if (attr == null) return !_.isEmpty(this.changed);
+          return _.has(this.changed, attr);
+        },*/
 
         changedAttributes: function(diff) {
-          if (!diff) return this.hasChanged() ? _.clone(objToPaths(this.changed)) : false;
+          if (!diff) return this.hasChanged() ? _.clone(this.changed) : false;
           var val, changed = false, old = objToPaths(this._previousAttributes);
           for (var attr in objToPaths(diff)) {
             if (_.isEqual(old[attr], (val = diff[attr]))) continue;
